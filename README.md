@@ -54,16 +54,27 @@ Tentative:
 ## Limitations
 
 ❌ No Central Package Registry
+
 No conan-center or vcpkg equivalent.
+
 You need to manually specify Git URLs, refs, or hashes.
+
 ❌ No Binary Distribution / Caching
+
 No binary cache means always building from source, which slows things down.
+
 Conan and vcpkg support binary packages and shared caching across projects.
+
 ❌ Limited Testing for Platform Support and Build System Integration
+
 Primarily tested on MacOS, expected to function similarly on Linux.
+
 Windows support is unknown.
+
 There are multiple build systems, but only CMake has been verified.
+
 ❌ No Dependency Resolution
+
 Just include the version you need.
 
 ---
