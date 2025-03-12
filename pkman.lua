@@ -353,7 +353,7 @@ end
 -- This is my attempt for making type hints, but it isn't complete
 --
 ---@class PkmanBuild
----@field system string? "cmake" | "make" | "meson" | "custom"
+---@field system string? "cmake" | "make" | "meson"
 ---@field install boolean|string? Install flag or install path
 ---@field options string[]? Extra options for the build system
 ---@field parallel boolean? Enable parallel builds
@@ -735,7 +735,6 @@ end
 -- - `"cmake"` (default): Runs `cmake` configure, build, and install steps.
 -- - `"make"`: Runs `make` and optionally installs with `DESTDIR`.
 -- - `"meson"`: Runs `meson setup`, `compile`, and `install`.
--- - `"custom"`: (Not yet implemented) Expected to run custom commands.
 --
 -- The function automatically creates the `build_dir` if it doesn't exist.
 -- The install step is enabled by default unless explicitly disabled in the `build` table.
@@ -798,7 +797,7 @@ local function build_project(install_paths, source_dir, build_dir, build_spec)
 		end
 	end
 
-	-- Maintainer's Note: I have not tested make, meson, or the custom builds. Just cmake.
+	-- Maintainer's Note: I have not tested make, meson, or any custom builds. Just cmake.
 	-- I don't have good tests in general, nor do I know how it works on Linux or Windows.
 	-- I suspect the program will work on Linux. The "point" of a build system like this may be to
 	-- enable consistent cross-platform builds, but I primarily wrote it for my own use. It is more of
