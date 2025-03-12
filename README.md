@@ -47,7 +47,7 @@ and easy to configure using Lua.
 
 Tentative:
 - [ ] **Flexible build system support** — `cmake`, `make`, `meson`, or custom
-- [ ] **Cross-platform potential** — Primarily tested on macOS/Linux
+- [ ] **Cross-platform** — Primarily tested on MacOS currently
 
 ---
 
@@ -55,15 +55,15 @@ Tentative:
 
 ❌ No Central Package Registry
 
-No conan-center or vcpkg equivalent.
+No `conan-center` or `vcpkg` equivalent.
 
-You need to manually specify Git URLs, refs, or hashes.
+You need to specify Git URLs, refs, or hashes.
 
 ❌ No Binary Distribution / Caching
 
 No binary cache means always building from source, which slows things down.
 
-Conan and vcpkg support binary packages and shared caching across projects.
+Conan and `vcpkg` support binary packages and shared caching across projects.
 
 ❌ Limited Testing for Platform Support and Build System Integration
 
