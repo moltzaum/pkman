@@ -7,35 +7,35 @@ plugin managers.
 from source in an isolated `external/` directory. It's lightweight, extensible,
 and easy to configure using Lua.
 
-Maintainer's Note: This is not a professional tool. I intend to use it, but
-prefer that it be a "one and done" project maintenance-wise.
-
-Honestly, I'm unfamiliar with how dependencies in C++ are supposed to be
-handled. I was thinking that with so many options (Conan, CPM.cmake, Hunter,
-vcpkg), maybe they all suck at least a little? (-‿-")
-
-My inspiration, aside from Neovim, was a document I found titled "The Pitchfork
-Layout (PFL)". This framework made a lot of sense to me. I had recently also
-heard about `build.zig`, which further drove the point that there isn't a single
-preferred way of managing dependencies for C++ projects.
-
-What I wanted:
-- I wanted to organize my project using conventions outlined in the PFL
-- I wanted to "make it easy" to get going with project sources I find on the internet
-- I wanted the ability to configure the build
-- I did NOT want to script in CMake, or bash
-
-In the end, the tool has limitations compared to actual package managers, but it
-shouldn't be an issue for me. I do not care about leveraging a central package
-registry. Although binary distribution may reduce build times, build objects
-should be cached, limiting any pain-points.
-
-From my observation, building from source seems to be the common case when it
-comes to managing dependencies. I have sometimes wanted to build a project off
-the `master` branch as well.
-
-Fair warning: I don't have good tests in general, nor do I know how it works on
-Linux or Windows.
+> Maintainer's Note: This is not a professional tool. I intend to use it, but
+> prefer that it be a "one and done" project maintenance-wise.
+>
+> Honestly, I'm unfamiliar with how dependencies in C++ are supposed to be
+> handled. I was thinking that with so many options (Conan, CPM.cmake, Hunter,
+> vcpkg), maybe they all suck at least a little? (-‿-")
+>
+> My inspiration, aside from Neovim, was a document I found titled "The Pitchfork
+> Layout (PFL)". This framework made a lot of sense to me. I had recently also
+> heard about `build.zig`, which further drove the point that there isn't a single
+> preferred way of managing dependencies for C++ projects.
+>
+> What I wanted:
+> - I wanted to organize my project using conventions outlined in the PFL
+> - I wanted to "make it easy" to get going with project sources I find on the internet
+> - I wanted the ability to configure the build
+> - I did NOT want to script in CMake, or bash
+>
+> In the end, the tool has limitations compared to actual package managers, but it
+> shouldn't be an issue for me. I do not care about leveraging a central package
+> registry. Although binary distribution may reduce build times, build objects
+> should be cached, limiting any pain-points.
+>
+> From my observation, building from source seems to be the common case when it
+> comes to managing dependencies. I have sometimes wanted to build a project off
+> the `master` branch as well.
+>
+> Fair warning: I don't have good tests in general, nor do I know how it works on
+> Linux or Windows.
 
 ---
 
