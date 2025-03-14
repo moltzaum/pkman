@@ -92,7 +92,7 @@ local function _stringify(...)
 	for i = 1, #vargs do
 		vargs[i] = tostring(vargs[i])
 	end
-	return table.concat(vargs, " ")
+	return table.concat(vargs, "")
 end
 
 -- Evaluates a params table, calling any functions to get dynamic values.
@@ -357,6 +357,7 @@ end
 ---@field install boolean|string? Install flag or install path
 ---@field options string[]? Extra options for the build system
 ---@field parallel boolean? Enable parallel builds
+---@field local_source boolean? If true, use build flags appropriate for the local project
 
 ---@class PkmanDependency
 ---@field [1] string? GitHub shorthand, "owner/repo"
@@ -548,7 +549,7 @@ local function resolve_refspec(repo_url, version)
 	if version.hash then
 		hash = _expand_short_commit_hash(version.hash)
 		if hash == nil then
-			error(logger:fmt("Could not resolve hash: " .. version.hash))
+			error(logger:fmt("Could not resolve hash: ", version.hash))
 		end
 	end
 	return hash or version.refspec or _get_latest_commit()
@@ -665,9 +666,9 @@ end
 --   - A GitHub `"owner/project"` string.
 --   - A table with `url`, `hash`, `refspec`, and/or `build`.
 --
---- @return nil|string The `ref` identifier for the dependency (e.g., "owner/project"). Returns
+--- @return string|nil The `ref` identifier for the dependency (e.g., "owner/project"). Returns
 --- `nil` if no build instructions are specified.
---- @return { ref: string, build_dir: string, build_spec: PkmanBuild }|nil Returns `nil` if no build
+--- @return { source_dir: string, build_dir: string, build_spec: PkmanBuild }|nil Returns `nil` if no build
 --- instructions are specified.
 --   Otherwise, returns a table `{ source_dir, build_dir, build_spec }`, where:
 --   - `source_dir` (string): The path where the source repo is cloned.
@@ -704,7 +705,9 @@ local function process_dependency(download_path, dep)
 			owner, project_name = dep[1]:match("([^/]+)/([^/]+)")
 			url = string.format("https://github.com/%s/%s.git", owner, project_name)
 		else
-			error(logger:fmt("Invalid dependency format"))
+			logger:writeln("Local project source")
+			dep.build.local_source = true
+			return "local", { "./src", "./build", dep.build }
 		end
 	else
 		error(logger:fmt("Invalid dependency format: dependency must be either table or string"))
@@ -724,6 +727,20 @@ local function process_dependency(download_path, dep)
 		return nil
 	end
 	return ref, { source_dir, build_dir, dep.build }
+end
+
+function table.nonils(t)
+    local j = 1
+    for i = 1, #t do
+        if t[i] ~= nil then
+            t[j] = t[i]
+            j = j + 1
+        end
+    end
+    for i = j, #t do
+        t[i] = nil
+    end
+    return t
 end
 
 -- Builds a project using the specified build system.
@@ -773,10 +790,12 @@ end
 local function build_project(install_paths, source_dir, build_dir, build_spec)
 	local build_system = build_spec.system or "cmake"
 	local install_path = build_spec.install == true and build_dir .. "/install" or build_spec.install
-	local install_enabled = build_spec.install ~= false -- Default to true
 	local logger = pkman.get_logger()
 
 	lfs.mkdir(build_dir)
+
+	-- Ensure table is not nil
+	build_spec.options = build_spec.options or {}
 
 	-- CODE REVIEW(MM): This is specific to cmake, I should think about the bigger picture here. It is
 	-- not documented that configuration is not implemented the same for all build systems.
@@ -786,14 +805,15 @@ local function build_project(install_paths, source_dir, build_dir, build_spec)
 		for _, dep_name in ipairs(build_spec.dependencies) do
 			local dep_path = install_paths[dep_name]
 			if dep_path then
+				logger:debug(string.format("Adding %s to cmake prefix paths", dep_name))
 				table.insert(prefix_paths, dep_path)
 			else
-				logger:debug("Dependency not found: " .. dep_name)
+				logger:debug("Dependency not found: ", dep_name)
 			end
 		end
 
 		if #prefix_paths > 0 then
-		  table.insert(build_spec.options, '-DCMAKE_PREFIX_PATH=' .. table.concat(prefix_paths, ";"))
+		  table.insert(build_spec.options, '-DCMAKE_PREFIX_PATH="' .. table.concat(prefix_paths, ";") .. '"')
 		end
 	end
 
@@ -804,36 +824,47 @@ local function build_project(install_paths, source_dir, build_dir, build_spec)
 	-- a learning experience than a truly professional tool.
 	if build_system == "cmake" then
 
-		run_command("cmake", {
-			"-Wno-dev",
+		-- Falsy value must be nil, not false for this to work as intended
+		local is_dep = (not build_spec.local_source) or nil
+		local install = (build_spec.install) or nil
+
+		run_command("cmake", table.nonils({
 			"-B", build_dir,
-			"-S", source_dir,
-			"-DCMAKE_INSTALL_PREFIX=" .. install_path,
-			unpack(build_spec.options or {})
-		}, { log_command = true })
+			is_dep and "-S",
+			is_dep and source_dir,
+			is_dep and "-Wno-dev",
+			install and "-DCMAKE_INSTALL_PREFIX=" .. install_path,
+			unpack(build_spec.options)
+		}), { log_command = true })
 
 		run_command("cmake", {
 			"--build", build_dir,
 			unpack({ build_spec.parallel and "--parallel" or "" })
 		})
 
-		if install_enabled then
-			run_command("cmake", {"--install", build_dir})
+		if install_path then
+			-- MM: CMake 3.15 introduces `cmake --install build_dir`, but I like the below because I see
+			-- output from the build system. e.g. "make: *** No rule to make target install'.  Stop."
+			run_command("cmake", {
+				"--build", build_dir,
+				"--target", "install",
+				unpack({ build_spec.parallel and "--parallel" or "" })
+			})
 		end
 
 	elseif build_system == "make" then
 		run_command("make", {"-C", build_dir, build_spec.parallel and "-j" or ""})
-		if install_enabled then
+		if install_path then
 			run_command("make", {"-C", build_dir, "DESTDIR=" .. install_path})
 		end
 	elseif build_system == "meson" then
 		run_command("meson", {"setup", build_dir, source_dir, "-Wno-dev"})
 		run_command("meson", {"compile", "-C", build_dir})
-		if install_enabled then
+		if install_path then
 			run_command("meson", {"install", "-C", "--destdir=" .. install_path})
 		end
 	else
-		error(logger:fmt("Unsupported build system: " .. build_system))
+		error(logger:fmt("Unsupported build system: ", build_system))
 	end
 end
 
@@ -850,10 +881,10 @@ function pkman.with_dir(dir, fn)
 	local logger = pkman.get_logger()
 	return function(...)
 		local cwd = lfs.currentdir()
-		logger:debug("chdir " .. dir)
+		logger:debug("chdir ", dir)
 		assert(lfs.chdir(dir))
 		local ok, result = pcall(fn, ...)
-		logger:debug("chdir " .. cwd)
+		logger:debug("chdir ", cwd)
 		assert(lfs.chdir(cwd))
 		if not ok then
 			error(result)
@@ -927,11 +958,13 @@ function pkman.setup(dependencies)
 		if ref and build_args then
 			table.insert(build_deps, build_args)
 			local _, build_dir, build_spec = unpack(build_args)
-			local install_dir = build_spec.install == true and build_dir .. "/install" or build_spec.install
-			-- CODE REVIEW(MM): An actual function to resolve the path would be preferrable
-			-- The CMAKE_PREFIX_PATH must be an absolute directory. Hopefully LuaFileSystem will get a
-			-- function for resolving an absolute path in the future.
-			install_paths[ref] = lfs.currentdir() .. "/" .. install_dir
+			if build_spec.install then
+				local install_dir = build_spec.install == true and build_dir .. "/install" or build_spec.install
+				-- CODE REVIEW(MM): An actual function to resolve the path would be preferrable
+				-- The CMAKE_PREFIX_PATH must be an absolute directory. Hopefully LuaFileSystem will get a
+				-- function for resolving an absolute path in the future.
+				install_paths[ref] = lfs.currentdir() .. "/" .. install_dir
+			end
 		end
 	end
 	-- Wait for async functions
