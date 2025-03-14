@@ -809,8 +809,8 @@ end
 --   `"./external/corrade-build"`).
 -- @param build (table) Build configuration options:
 --   - `system` (string): The build system to use. Defaults to `"cmake"`.
---   - `install` (boolean|string): If `true` (default), installs to `<build_dir>/install`.
---     If `false`, disables install.
+--   - `install` (boolean|string): If `true`, installs to `<build_dir>/install`.
+--     If `false` (default), disables install.
 --     If a string, specifies a custom install path.
 --   - `options` (table): Additional arguments to pass to the configure step (`cmake`, etc.).
 --   - `parallel` (boolean): Enables parallel build

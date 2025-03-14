@@ -45,10 +45,6 @@ and easy to configure using Lua.
 - [x] **Asynchronous downloading** — Parallel fetches via `luv`
 - [x] **Local installs** — Dependencies installed in project-local directories
 
-Tentative:
-- [ ] **Flexible build system support** — `cmake`, `make`, `meson`, or custom
-- [ ] **Cross-platform** — Primarily tested on MacOS currently
-
 ---
 
 ## Limitations
@@ -58,12 +54,6 @@ Tentative:
 No `conan-center` or `vcpkg` equivalent.
 
 You need to specify Git URLs, refs, or hashes.
-
-❌ No Binary Distribution / Caching
-
-No binary cache means always building from source, which slows things down.
-
-Conan and `vcpkg` support binary packages and shared caching across projects.
 
 ❌ Limited Testing for Platform Support and Build System Integration
 
@@ -110,7 +100,7 @@ Then run the **bootstrap script**:
 This script will:
 - Check for system dependencies
 - Install Lua dependencies (`luafilesystem`, `luv`)
-- Download the `pkman.lua` script into `external/pkman.lua`
+- Download the `pkman.lua` script into `tools/pkman.lua`
 
 ---
 
@@ -118,7 +108,7 @@ This script will:
 
 ### 1. Create a `build.lua` file at your project root:
 ```
-local pkman = require("external/pkman.lua")
+local pkman = require("tools/pkman.lua")
 
 pkman.setup({
   {
@@ -181,10 +171,10 @@ lua build.lua
 project-root/
 ├── build.lua                 # Your dependency setup
 ├── external/
-│   ├── pkman.lua             # The package manager
 │   ├── <dependency>/         # Dependency source
 │   └── <dependency-build>/   # Dependency build dir
 ├── tools/
+│   ├── pkman.lua             # The package manager
 │   └── bootstrap-pkman.sh    # Bootstrap script
 └── README.md
 ```
