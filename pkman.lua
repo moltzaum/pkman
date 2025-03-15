@@ -40,6 +40,12 @@ local lfs = require("lfs")
 -- luv library for async process management
 local uv = require("luv")
 
+-- json hash serializes configuration to cache builds better
+local cjson = require("cjson")
+local sha1 = require("sha1")
+
+cjson.encode_escape_forward_slash(false)
+
 --[[
  Logger module
  A minimal and flexible logger for Lua applications.
@@ -666,8 +672,6 @@ end
 --   - A GitHub `"owner/project"` string.
 --   - A table with `url`, `hash`, `refspec`, and/or `build`.
 --
---- @return string|nil The `ref` identifier for the dependency (e.g., "owner/project"). Returns
---- `nil` if no build instructions are specified.
 --- @return { source_dir: string, build_dir: string, build_spec: PkmanBuild }|nil Returns `nil` if no build
 --- instructions are specified.
 --   Otherwise, returns a table `{ source_dir, build_dir, build_spec }`, where:
@@ -705,9 +709,10 @@ local function process_dependency(download_path, dep)
 			owner, project_name = dep[1]:match("([^/]+)/([^/]+)")
 			url = string.format("https://github.com/%s/%s.git", owner, project_name)
 		else
-			logger:writeln("Local project source")
 			dep.build.local_source = true
-			return "local", { "./src", "./build", dep.build }
+			-- Hash serialization of dependency for config caching logic
+			dep.build.refhash = { key="local", value=table.hash(dep) }
+			return { "./src", "./build", dep.build }
 		end
 	else
 		error(logger:fmt("Invalid dependency format: dependency must be either table or string"))
@@ -726,21 +731,62 @@ local function process_dependency(download_path, dep)
 	if not dep.build then
 		return nil
 	end
-	return ref, { source_dir, build_dir, dep.build }
+	-- Hash serialization of dependency for config caching logic
+	dep.build.refhash = { key=ref, value=table.hash(dep) }
+	return { source_dir, build_dir, dep.build }
 end
 
 function table.nonils(t)
-    local j = 1
-    for i = 1, #t do
-        if t[i] ~= nil then
-            t[j] = t[i]
-            j = j + 1
-        end
-    end
-    for i = j, #t do
-        t[i] = nil
-    end
-    return t
+	local j = 1
+	for i = 1, #t do
+		if t[i] ~= nil then
+			t[j] = t[i]
+			j = j + 1
+		end
+	end
+	for i = j, #t do
+		t[i] = nil
+	end
+	return t
+end
+
+function table.make_hashtable_hashable(tbl)
+	local keys = {}
+	local vals = {}
+	local indices = {}
+
+	for k, v in pairs(tbl) do
+		if type(v) ~= "function" then
+			table.insert(vals, (type(v) == "table" and table.make_hashtable_hashable(v)) or v)
+			table.insert(keys, k)
+		end
+	end
+
+	for i = 1, #keys do
+		indices[i] = i
+	end
+	table.sort(indices, function(a, b)
+		-- Tables contain string keys and indexes (integers), which are not comparable
+		if type(keys[a]) == type(keys[b]) then return keys[a] < keys[b] end
+		return false
+	end)
+
+	local sorted_values = {}
+	for i, idx in ipairs(indices) do
+		sorted_values[i] = vals[idx]
+	end
+	return sorted_values
+end
+
+function table.hash(t)
+	return sha1.sha1(cjson.encode(table.make_hashtable_hashable(t)))
+end
+
+local function any(tbl, predicate)
+	for _, v in ipairs(tbl) do
+		if predicate(v) then return true end
+	end
+	return false
 end
 
 -- Builds a project using the specified build system.
@@ -787,42 +833,35 @@ end
 --   install = true,
 --   parallel = true
 -- })
-local function build_project(install_paths, source_dir, build_dir, build_spec)
-	local build_system = build_spec.system or "cmake"
-	local install_path = build_spec.install == true and build_dir .. "/install" or build_spec.install
+local function build_project(build_metadata, source_dir, build_dir, build_spec)
 	local logger = pkman.get_logger()
 
 	lfs.mkdir(build_dir)
 
-	-- Ensure table is not nil
-	build_spec.options = build_spec.options or {}
+	-- Maintainer's Note: I have not tested make, meson, or any custom builds. Just cmake.
+	-- I don't have automated tests, nor have I tested Linux or Windows.
+	if build_spec.system == "cmake" then
 
-	-- CODE REVIEW(MM): This is specific to cmake, I should think about the bigger picture here. It is
-	-- not documented that configuration is not implemented the same for all build systems.
-	-- Automatically set CMAKE_PREFIX_PATH based on dependencies
-	if build_spec.dependencies then
-		local prefix_paths = {}
-		for _, dep_name in ipairs(build_spec.dependencies) do
-			local dep_path = install_paths[dep_name]
-			if dep_path then
-				logger:debug(string.format("Adding %s to cmake prefix paths", dep_name))
-				table.insert(prefix_paths, dep_path)
-			else
-				logger:debug("Dependency not found: ", dep_name)
+		-- Set CMAKE_PREFIX_PATH based on dependencies
+		if build_spec.dependencies then
+			local prefix_paths = {}
+			for _, dep_name in ipairs(build_spec.dependencies) do
+				local dep_path = build_metadata[dep_name]["install_path"]
+				if dep_path then
+					-- CODE REVIEW(MM): An actual function to resolve the path would be preferrable. Hopefully
+					-- LuaFileSystem will get a function for resolving an absolute path in the future.
+					dep_path = lfs.currentdir() .. "/" .. dep_path
+					logger:debug(string.format("Adding %s to cmake prefix paths", dep_name))
+					table.insert(prefix_paths, dep_path)
+				else
+					logger:debug("Dependency not found: ", dep_name)
+				end
+			end
+
+			if #prefix_paths > 0 then
+			  table.insert(build_spec.options, '-DCMAKE_PREFIX_PATH="' .. table.concat(prefix_paths, ";") .. '"')
 			end
 		end
-
-		if #prefix_paths > 0 then
-		  table.insert(build_spec.options, '-DCMAKE_PREFIX_PATH="' .. table.concat(prefix_paths, ";") .. '"')
-		end
-	end
-
-	-- Maintainer's Note: I have not tested make, meson, or any custom builds. Just cmake.
-	-- I don't have good tests in general, nor do I know how it works on Linux or Windows.
-	-- I suspect the program will work on Linux. The "point" of a build system like this may be to
-	-- enable consistent cross-platform builds, but I primarily wrote it for my own use. It is more of
-	-- a learning experience than a truly professional tool.
-	if build_system == "cmake" then
 
 		-- Falsy value must be nil, not false for this to work as intended
 		local is_dep = (not build_spec.local_source) or nil
@@ -833,7 +872,7 @@ local function build_project(install_paths, source_dir, build_dir, build_spec)
 			is_dep and "-S",
 			is_dep and source_dir,
 			is_dep and "-Wno-dev",
-			install and "-DCMAKE_INSTALL_PREFIX=" .. install_path,
+			install and "-DCMAKE_INSTALL_PREFIX=" .. build_spec.install,
 			unpack(build_spec.options)
 		}), { log_command = true })
 
@@ -842,7 +881,7 @@ local function build_project(install_paths, source_dir, build_dir, build_spec)
 			unpack({ build_spec.parallel and "--parallel" or "" })
 		})
 
-		if install_path then
+		if build_spec.install then
 			-- MM: CMake 3.15 introduces `cmake --install build_dir`, but I like the below because I see
 			-- output from the build system. e.g. "make: *** No rule to make target install'.  Stop."
 			run_command("cmake", {
@@ -852,19 +891,19 @@ local function build_project(install_paths, source_dir, build_dir, build_spec)
 			})
 		end
 
-	elseif build_system == "make" then
+	elseif build_spec.system == "make" then
 		run_command("make", {"-C", build_dir, build_spec.parallel and "-j" or ""})
-		if install_path then
-			run_command("make", {"-C", build_dir, "DESTDIR=" .. install_path})
+		if build_spec.install then
+			run_command("make", {"-C", build_dir, "DESTDIR=" .. build_spec.install})
 		end
-	elseif build_system == "meson" then
+	elseif build_spec.system == "meson" then
 		run_command("meson", {"setup", build_dir, source_dir, "-Wno-dev"})
 		run_command("meson", {"compile", "-C", build_dir})
-		if install_path then
-			run_command("meson", {"install", "-C", "--destdir=" .. install_path})
+		if build_spec.install then
+			run_command("meson", {"install", "-C", "--destdir=" .. build_spec.install})
 		end
 	else
-		error(logger:fmt("Unsupported build system: ", build_system))
+		error(logger:fmt("Unsupported build system: ", build_spec.system))
 	end
 end
 
@@ -950,38 +989,88 @@ end
 --- }
 function pkman.setup(dependencies)
 	local build_deps = {}
-	local install_paths = {}
+	local build_metadata = {}
 	local external = "external"
+
+	local logger = pkman.get_logger()
+
 	lfs.mkdir(external)
 	for _, dep in ipairs(dependencies) do
-		local ref, build_args = process_dependency(external, dep)
-		if ref and build_args then
+		local build_args = process_dependency(external, dep)
+		if build_args then
 			table.insert(build_deps, build_args)
-			local _, build_dir, build_spec = unpack(build_args)
-			if build_spec.install then
-				local install_dir = build_spec.install == true and build_dir .. "/install" or build_spec.install
-				-- CODE REVIEW(MM): An actual function to resolve the path would be preferrable
-				-- The CMAKE_PREFIX_PATH must be an absolute directory. Hopefully LuaFileSystem will get a
-				-- function for resolving an absolute path in the future.
-				install_paths[ref] = lfs.currentdir() .. "/" .. install_dir
-			end
 		end
 	end
+
 	-- Wait for async functions
 	uv.run()
+
+	local dep_cache_from_disk = {}
+	local dep_cache_to_disk = {}
+	local lockfilename = ".pkman_dep.cache"
+	local lockfile = io.open(lockfilename, "r")
+	if lockfile then
+		logger:debug("Reading from ", lockfilename)
+		dep_cache_from_disk = cjson.decode(lockfile:read("*a"))
+		lockfile:close()
+	end
+
 	for _, build_args in ipairs(build_deps) do
 		local source_dir, build_dir, build_spec = unpack(build_args)
-		-- The callbacks may change the directory, so the original cwd is kept
+
+		-- The callbacks may change the directory, so the original cwd is kept.
+		-- cwd needs to be defined before the goto is used, or it is an error
 		local cwd = lfs.currentdir()
+
+		-- Handle default values
+		build_spec.system = build_spec.system or "cmake"
+		build_spec.install = (build_spec.install == true and build_dir .. "/install") or build_spec.install
+		build_spec.options = build_spec.options or {}
+		build_spec.dependencies = build_spec.dependencies or {}
+
+		-- build_spec.install => (no install directory => should install), no build_spec.install => no install
+		local no_install_needed = (build_spec.install and lfs.attributes(build_spec.install)) or true
+
+		local no_dependency_updates = not any(build_spec.dependencies, function(k)
+			return build_metadata[k]["built"]
+		end)
+
+		-- Initialize metadata for key
+		build_metadata[build_spec.refhash.key] = build_metadata[build_spec.refhash.key] or {}
+		build_metadata[build_spec.refhash.key]["install_path"] = build_spec.install or nil
+
+		-- CODE REVIEW(MM): It may be preferrable to compare checksums for source and dependency
+		-- build directories to check if rebuilding is necessary.
+		-- Checking to see if there is any reason to rebuild
+		if (dep_cache_from_disk[build_spec.refhash.key] == build_spec.refhash.value and
+			lfs.attributes(build_dir) and no_install_needed and no_dependency_updates and
+			not build_spec.force_rebuild) then
+			logger:writeln("Skipping build ", build_spec.refhash.key)
+			goto skip_build
+		end
+
+		-- Update metadata
+		build_metadata[build_spec.refhash.key]["built"] = true
+
 		if build_spec.pre_build then
 			build_spec.pre_build()
+			lfs.chdir(cwd)
 		end
-		lfs.chdir(cwd)
-		build_project(install_paths, source_dir, build_dir, build_spec)
+
+		build_project(build_metadata, source_dir, build_dir, build_spec)
+
 		if build_spec.post_build then
 			build_spec.post_build()
+			lfs.chdir(cwd)
 		end
-		lfs.chdir(cwd)
+		::skip_build::
+		dep_cache_to_disk[build_spec.refhash.key] = build_spec.refhash.value
+	end
+	local file = io.open(lockfilename, "w")
+	if file then
+		logger:debug("Writing to ", lockfilename)
+		file:write(cjson.encode(dep_cache_to_disk))
+		file:close()
 	end
 end
 
