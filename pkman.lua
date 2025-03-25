@@ -649,6 +649,35 @@ local function download_git_repo(id, url, source_dir, version)
 	end
 end
 
+local function hash_directory_mtime(path)
+
+	local function _collect_mtimes_recursive(dir, mtimes)
+		mtimes = mtimes or {}
+
+		for entry in lfs.dir(dir) do
+			if entry ~= "." and entry ~= ".." then
+				local fullpath = dir .. "/" .. entry
+				local attr = lfs.attributes(fullpath)
+				if attr.mode == "file" then
+					table.insert(mtimes, attr.modification)
+				elseif attr.mode == "directory" then
+					_collect_mtimes_recursive(fullpath, mtimes)
+				end
+			end
+		end
+		return mtimes
+	end
+
+	-- String concatenation is technically more correct than addition, but the likihood of summing to
+	-- the same number seems highly unlikely. Using integer addition for marginal speed gain.
+	local mtimes = _collect_mtimes_recursive(path)
+	local sum = 0
+	for _, timestamp in ipairs(mtimes) do
+		sum = sum + timestamp
+	end
+	return sha1(tostring(sum))
+end
+
 -- Processes a dependency and schedules its download or update.
 --
 -- This function parses the dependency definition, constructs the appropriate repository URL
@@ -711,7 +740,7 @@ local function process_dependency(download_path, dep)
 		else
 			dep.build.local_source = true
 			-- Hash serialization of dependency for config caching logic
-			dep.build.refhash = { key="local", value=table.hash(dep) }
+			dep.build.refhash = { key="local", value={source_hash=hash_directory_mtime("./src"), conf_hash=table.hash(dep)} }
 			return { "./src", "./build", dep.build }
 		end
 	else
@@ -732,7 +761,7 @@ local function process_dependency(download_path, dep)
 		return nil
 	end
 	-- Hash serialization of dependency for config caching logic
-	dep.build.refhash = { key=ref, value=table.hash(dep) }
+	dep.build.refhash = { key=ref, value={source_hash=hash_directory_mtime(source_dir), conf_hash=table.hash(dep)} }
 	return { source_dir, build_dir, dep.build }
 end
 
@@ -1036,15 +1065,14 @@ function pkman.setup(dependencies)
 		end)
 
 		-- Initialize metadata for key
+		dep_cache_from_disk[build_spec.refhash.key] = dep_cache_from_disk[build_spec.refhash.key] or {}
 		build_metadata[build_spec.refhash.key] = build_metadata[build_spec.refhash.key] or {}
 		build_metadata[build_spec.refhash.key]["install_path"] = build_spec.install or nil
 
-		-- CODE REVIEW(MM): It may be preferrable to compare checksums for source and dependency
-		-- build directories to check if rebuilding is necessary.
-		-- Checking to see if there is any reason to rebuild
-		if (dep_cache_from_disk[build_spec.refhash.key] == build_spec.refhash.value and
-			lfs.attributes(build_dir) and no_install_needed and no_dependency_updates and
-			not build_spec.force_rebuild) then
+		if (not build_spec.force_rebuild and no_install_needed and no_dependency_updates and
+			dep_cache_from_disk[build_spec.refhash.key].source_hash == build_spec.refhash.value.source_hash and
+			dep_cache_from_disk[build_spec.refhash.key].conf_hash == build_spec.refhash.value.conf_hash and
+			lfs.attributes(build_dir)) then
 			logger:writeln("Skipping build ", build_spec.refhash.key)
 			goto skip_build
 		end
