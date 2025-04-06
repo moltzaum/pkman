@@ -129,9 +129,10 @@ end
 -- @treturn string The fully formatted log message.
 function Logger:fmt(...)
 	local fmt, params
-	if self.loglevel >= Logger.DEBUG then
+	if self._wrt_debug then
 		fmt = self.debug_format
 		params = self.debug_params
+		self._wrt_debug = false
 	else
 		fmt = self.format
 		params = self.params
@@ -175,6 +176,7 @@ end
 function Logger:debug(...)
 	if self.loglevel >= Logger.DEBUG then
 		self._add_newline = true
+		self._wrt_debug = true
 		self:write(...)
 	end
 end
@@ -396,7 +398,10 @@ pkman.Logger = {}
 pkman.Logger.INFO = Logger.INFO
 pkman.Logger.DEBUG = Logger.DEBUG
 
-pkman.__logger = Logger:new({ format = "[%s] ", params = { "pkman" } })
+pkman.__logger = Logger:new({
+	format = "[%s] ", params = { "pkman" },
+	debug_format = "[%s] DEBUG: ", debug_params = { "pkman" }
+})
 
 function pkman.get_logger()
 	return pkman.__logger
@@ -462,14 +467,31 @@ local function run_command(cmd, args, opts)
 	end
 
 	if opts.capture_output then
-		local handle, err = io.popen(cmd .. " " .. table.concat(args, " "))
+		local handle, err = io.popen(cmd .. " " .. table.concat(args, " ") .. "; echo $?")
 		if not handle then
 			error(logger:fmt("Failed to execute command: ", err))
 		end
 		local result = handle:read("*a")
 		handle:close()
-		return result
-	end
+
+		-- Extract exit code from last line
+		local lines = {}
+		for line in result:gmatch("[^\r\n]+") do
+			table.insert(lines, line)
+		end
+		local exit_code = tonumber(table.remove(lines)) or 1
+		if exit_code ~= 0 then
+			if opts.unwrap then
+				error(logger:fmt("Command failed with exit code: ", exit_code))
+			end
+			return nil, exit_code
+		end
+		local stdout = table.concat(lines, "\n")
+		if opts.unwrap then
+			return stdout
+		end
+		return stdout, 0
+		end
 
 	if opts.async then
 		async(opts.id or "<no-ident>", cmd, args)
@@ -519,24 +541,16 @@ end
 -- -- or with explicit refspec:
 -- local version = { refspec = "v2020.06" }
 -- local resolved = resolve_refspec(repo_url, version)
-local function resolve_refspec(repo_url, version)
+local function resolve_refspec(repo_url, source_dir, version)
 
-	-- Expand short hash ref into fully-qualified SHA, if possible. First match wins if ambiguous.
+	-- Expand short hash ref into fully-qualified SHA, if possible
 	local function _expand_short_commit_hash(hash)
-		local result = run_command("git", {"ls-remote", repo_url}, { capture_output = true })
-		if not result then
+		local result, exit_code = run_command("git", {"-C", source_dir, "rev-parse", hash}, { capture_output = true })
+		print(result, exit_code)
+		if exit_code ~= 0 then
 			return nil
 		end
-		-- Iterate each line of ls-remote and extract the full SHA if substring matches
-		for line in result:gmatch("[^\r\n]+") do
-			local full_sha, ref = line:match("(%w+)%s+(%S+)")
-			if full_sha and ref then
-				if full_sha:sub(1, #hash) == hash then
-					return full_sha
-				end
-			end
-		end
-		return nil
+		return result
 	end
 
 	-- Queries the latest commit from main/master branch
@@ -544,7 +558,7 @@ local function resolve_refspec(repo_url, version)
 		local cmd, args = "git", {
 			"ls-remote", repo_url,
 			"--heads", "refs/heads/main", "refs/heads/master"}
-		local result = run_command(cmd, args, { capture_output = true })
+		local result = run_command(cmd, args, { capture_output = true, unwrap = true })
 		local main, master = "(%w+)%s+refs/heads/main", "(%w+)%s+refs/heads/master"
 		return result and (result:match(main) or result:match(master)) or nil
 	end
@@ -555,7 +569,10 @@ local function resolve_refspec(repo_url, version)
 	if version.hash then
 		hash = _expand_short_commit_hash(version.hash)
 		if hash == nil then
-			error(logger:fmt("Could not resolve hash: ", version.hash))
+			-- Fatal error, but it should not contain a stack trace (it is not a programmer error anyway).
+			-- Would be nice if I could collect multiple errors, but that would require a signficant rewrite.
+			logger:writeln("Could not resolve hash: ", version.hash)
+			os.exit(1)
 		end
 	end
 	return hash or version.refspec or _get_latest_commit()
@@ -603,7 +620,7 @@ local function download_git_repo(id, url, source_dir, version)
 
 	local logger = pkman.get_logger()
 
-	local refspec = resolve_refspec(url, version)
+	local refspec = resolve_refspec(url, source_dir, version)
 	if not refspec then
 		error(logger:fmt("No tags or commits found for dependency ", id))
 	end
@@ -629,7 +646,7 @@ local function download_git_repo(id, url, source_dir, version)
 	-- Gets the currently installed version (Git commit hash) for a cloned repository
 	local function _get_installed_version(module_dir)
 		local cmd, args = "git", {"-C", module_dir, "rev-parse", "HEAD"}
-		local result = run_command(cmd , args, { capture_output = true })
+		local result = run_command(cmd , args, { capture_output = true, unwrap = true })
 		return result and result:gsub("\n", "")
 	end
 
