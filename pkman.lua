@@ -620,49 +620,35 @@ local function download_git_repo(id, url, source_dir, version)
 	local logger = pkman.get_logger()
 	local refspec = version.hash or version.refspec
 
-	local function _async_clone_repo()
-		-- MM: The conditional logic here is similar to `resolve_refspec` in its purpose but is more
-		-- brittle. However, it needs to run here because git rev-parse requires local git objects.
-		run_command("sh", {"-c", string.format([[url=%s; src=%s; refspec=%s
-			git clone --progress $url $src
-			sha=$(git -C $src rev-parse $refspec)
-			[ -z "$sha" ] && \
-				sha=$(git ls-remote $url | while read hash ref; do [ "$ref" = HEAD ] && echo $hash && break; done)
-			git -c advice.detachedHead=false -C $src checkout $sha
-			]], url, source_dir, refspec)
-		}, { id = id, async = true })
-	end
-
-	local function _async_update_repo()
-		run_command("sh", {"-c",
-			"git -c advice.detachedHead=false -C " .. source_dir .. " checkout " .. refspec,
-		}, { id = id, async = true })
-	end
-
-	-- Gets the currently installed version (Git commit hash) for a cloned repository
-	local function _get_installed_version(module_dir)
-		local cmd, args = "git", {"-C", module_dir, "rev-parse", "HEAD"}
-		local result = run_command(cmd , args, { capture_output = true, unwrap = true })
-		return result and result:gsub("\n", "")
-	end
-
 	if not lfs.attributes(source_dir) then
-		_async_clone_repo()
-		return
+		run_command("git", {"clone", "--progress", url, source_dir}, { id = id, async = true })
 	end
 
-	refspec = resolve_refspec(url, source_dir, version)
-	if not refspec then
-		error(logger:fmt("No tags or commits found for dependency ", id))
-	end
+	-- Wait until after the clone has completed to run this logic
+	return function()
+		-- Gets the currently installed version (Git commit hash) for a cloned repository
+		local function _get_installed_version(module_dir)
+			local cmd, args = "git", {"-C", module_dir, "rev-parse", "HEAD"}
+			local result = run_command(cmd , args, { capture_output = true, unwrap = true })
+			return result and result:gsub("\n", "")
+		end
 
-	-- Handle cases where clone has already occurred
-	local installed_version = _get_installed_version(source_dir)
-	if installed_version == refspec then
-		logger:writeln(id .. " already installed (commit " .. refspec .. ")")
-	else
-		logger:writeln("Updating dependency \"" .. id .. "\" to " .. refspec)
-		_async_update_repo()
+		refspec = resolve_refspec(url, source_dir, version)
+		if not refspec then
+			-- CODE_REVIEW(MM): Returning the error instead of panicing should probably be preferred.
+			-- I use `error` a lot in this file already; its not like this one in particular is bad.
+			error(logger:fmt("No tags or commits found for dependency ", id))
+		end
+
+		-- Handle cases where clone has already occurred
+		local installed_version = _get_installed_version(source_dir)
+		if installed_version == refspec then
+			logger:writeln(id .. " already installed (commit " .. refspec .. ")")
+		else
+			logger:writeln("Updating dependency \"" .. id .. "\" to " .. refspec)
+			run_command("git", {"-c advice.detachedHead=false -C " .. source_dir .. " checkout " .. refspec},
+				{ id = id, async = true })
+		end
 	end
 end
 
@@ -762,9 +748,9 @@ local function process_dependency(download_path, dep)
 			url = string.format("https://github.com/%s/%s.git", owner, project_name)
 		else
 			dep.build.local_source = true
-			-- Hash serialization of dependency for config caching logic
-			dep.build.lazy_refhash = function()
-				return { key="local", value={source_hash=hash_directory_mtime("./src"), conf_hash=table.hash(dep)} }
+			dep.build.finish_processing = function()
+				-- Hash serialization of dependency for config caching logic
+				dep.build.refhash = { key="local", value={source_hash=hash_directory_mtime("./src"), conf_hash=table.hash(dep)} }
 			end
 			return { "./src", "./build", dep.build }
 		end
@@ -776,18 +762,22 @@ local function process_dependency(download_path, dep)
 	local build_dir = string.format("%s/%s-build", download_path, project_name)
 
 	local ref = string.format("%s/%s", owner, project_name)
+	local finish_download = function() end
 	if type(dep) == "string" then
-		download_git_repo(ref, url, source_dir)
+		finish_download = download_git_repo(ref, url, source_dir)
 	elseif type(dep) == "table" then
-		download_git_repo(ref, url, source_dir, { hash=dep.hash, refspec=dep.refspec })
+		finish_download = download_git_repo(ref, url, source_dir, { hash=dep.hash, refspec=dep.refspec })
 	end
 
 	if not dep.build then
 		return nil
 	end
-	-- Hash serialization of dependency for config caching logic
-	dep.build.lazy_refhash = function()
-		return { key=ref, value={source_hash=hash_directory_mtime(source_dir), conf_hash=table.hash(dep)} }
+
+	dep.build.finish_processing = function()
+		-- Check out the correct refspec, which is not known until after the clone has completed
+		finish_download()
+		-- Hash serialization of dependency for config caching logic
+		dep.build.refhash = { key=ref, value={source_hash=hash_directory_mtime(source_dir), conf_hash=table.hash(dep)} }
 	end
 	return { source_dir, build_dir, dep.build }
 end
@@ -1075,7 +1065,7 @@ function pkman.setup(dependencies)
 		local source_dir, build_dir, build_spec = unpack(build_args)
 
 		-- Now evaluate the refhash since the downloads have completed
-		build_spec.refhash = build_spec.lazy_refhash()
+		build_spec.finish_processing()
 
 		-- The callbacks may change the directory, so the original cwd is kept.
 		-- cwd needs to be defined before the goto is used, or it is an error
