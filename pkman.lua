@@ -546,7 +546,6 @@ local function resolve_refspec(repo_url, source_dir, version)
 	-- Expand short hash ref into fully-qualified SHA, if possible
 	local function _expand_short_commit_hash(hash)
 		local result, exit_code = run_command("git", {"-C", source_dir, "rev-parse", hash}, { capture_output = true })
-		print(result, exit_code)
 		if exit_code ~= 0 then
 			return nil
 		end
@@ -619,28 +618,25 @@ end
 local function download_git_repo(id, url, source_dir, version)
 
 	local logger = pkman.get_logger()
-
-	local refspec = resolve_refspec(url, source_dir, version)
-	if not refspec then
-		error(logger:fmt("No tags or commits found for dependency ", id))
-	end
+	local refspec = version.hash or version.refspec
 
 	local function _async_clone_repo()
-		-- Shallow clone of git repository, fetching only one commit
-		run_command("sh", {"-c", table.concat({
-				"git init " .. source_dir,
-				"git -C " .. source_dir .. " remote add origin " .. url,
-				"git -C " .. source_dir .. " fetch --progress --depth 1 --tags origin " .. refspec,
-				"git -c advice.detachedHead=false -C " .. source_dir .. " checkout " .. refspec}, "; ")
-			}, { id = id, async = true })
+		-- MM: The conditional logic here is similar to `resolve_refspec` in its purpose but is more
+		-- brittle. However, it needs to run here because git rev-parse requires local git objects.
+		run_command("sh", {"-c", string.format([[url=%s; src=%s; refspec=%s
+			git clone --progress $url $src
+			sha=$(git -C $src rev-parse $refspec)
+			[ -z "$sha" ] && \
+				sha=$(git ls-remote $url | while read hash ref; do [ "$ref" = HEAD ] && echo $hash && break; done)
+			git -c advice.detachedHead=false -C $src checkout $sha
+			]], url, source_dir, refspec)
+		}, { id = id, async = true })
 	end
 
 	local function _async_update_repo()
-		-- Updates the repository to the referenced commit, fetching only that commit
-		run_command("bash", {"-c", table.concat({
-				"git -C " .. source_dir .. " fetch --depth 1 --tags origin " .. refspec,
-				"git -c advice.detachedHead=false -C " .. source_dir .. " checkout " .. refspec}, "; ")
-			}, { id = id, async = true })
+		run_command("sh", {"-c",
+			"git -c advice.detachedHead=false -C " .. source_dir .. " checkout " .. refspec,
+		}, { id = id, async = true })
 	end
 
 	-- Gets the currently installed version (Git commit hash) for a cloned repository
@@ -655,11 +651,15 @@ local function download_git_repo(id, url, source_dir, version)
 		return
 	end
 
+	refspec = resolve_refspec(url, source_dir, version)
+	if not refspec then
+		error(logger:fmt("No tags or commits found for dependency ", id))
+	end
+
 	-- Handle cases where clone has already occurred
 	local installed_version = _get_installed_version(source_dir)
 	if installed_version == refspec then
-		local hash = refspec:sub(1, 7)
-		logger:writeln(id .. " already installed (commit " .. hash .. ")")
+		logger:writeln(id .. " already installed (commit " .. refspec .. ")")
 	else
 		logger:writeln("Updating dependency \"" .. id .. "\" to " .. refspec)
 		_async_update_repo()
@@ -671,8 +671,14 @@ local function hash_directory_mtime(path)
 	local function _collect_mtimes_recursive(dir, mtimes)
 		mtimes = mtimes or {}
 
+		-- Ensure directory exists
+		if not lfs.attributes(dir) then
+			return mtimes
+		end
+
 		for entry in lfs.dir(dir) do
-			if entry ~= "." and entry ~= ".." then
+			-- Do not include special directories '.' and '..', or include hidden files
+			if entry ~= "." and entry ~= ".." and not entry:match("^%.") then
 				local fullpath = dir .. "/" .. entry
 				local attr = lfs.attributes(fullpath)
 				if attr.mode == "file" then
@@ -757,7 +763,9 @@ local function process_dependency(download_path, dep)
 		else
 			dep.build.local_source = true
 			-- Hash serialization of dependency for config caching logic
-			dep.build.refhash = { key="local", value={source_hash=hash_directory_mtime("./src"), conf_hash=table.hash(dep)} }
+			dep.build.lazy_refhash = function()
+				return { key="local", value={source_hash=hash_directory_mtime("./src"), conf_hash=table.hash(dep)} }
+			end
 			return { "./src", "./build", dep.build }
 		end
 	else
@@ -778,7 +786,9 @@ local function process_dependency(download_path, dep)
 		return nil
 	end
 	-- Hash serialization of dependency for config caching logic
-	dep.build.refhash = { key=ref, value={source_hash=hash_directory_mtime(source_dir), conf_hash=table.hash(dep)} }
+	dep.build.lazy_refhash = function()
+		return { key=ref, value={source_hash=hash_directory_mtime(source_dir), conf_hash=table.hash(dep)} }
+	end
 	return { source_dir, build_dir, dep.build }
 end
 
@@ -1063,6 +1073,9 @@ function pkman.setup(dependencies)
 
 	for _, build_args in ipairs(build_deps) do
 		local source_dir, build_dir, build_spec = unpack(build_args)
+
+		-- Now evaluate the refhash since the downloads have completed
+		build_spec.refhash = build_spec.lazy_refhash()
 
 		-- The callbacks may change the directory, so the original cwd is kept.
 		-- cwd needs to be defined before the goto is used, or it is an error
